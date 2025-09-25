@@ -25,7 +25,8 @@ RIGHT_ENCODER = 16
 
 # PID Constants (default values, will be overridden by client)
 use_PID = 0
-KP, Ki, KD = 0, 0, 0
+KP, Ki, KD = 0,0,0
+KP_R, Ki_R, KD_R = 0,0,0
 MAX_CORRECTION = 30  # Maximum PWM correction value
 
 # Global variables
@@ -323,7 +324,7 @@ def camera_stream_server():
 
 
 def pid_config_server():
-    global use_PID, KP, KI, KD
+    global use_PID, KP, KI, KD, KP_R, KI_R, KD_R
     
     # Create socket for receiving PID configuration
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -341,8 +342,8 @@ def pid_config_server():
                 # Receive PID constants (4 floats)
                 data = client_socket.recv(16)
                 if data and len(data) == 16:
-                    use_PID, KP, KI, KD = struct.unpack("!ffff", data)
-                    if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD}")
+                    use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!ffff", data)
+                    if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD},KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
                     else: print("The robot is not using PID.")
                     
                     # Send acknowledgment (1 for success)
