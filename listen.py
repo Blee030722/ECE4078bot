@@ -156,7 +156,7 @@ def apply_min_threshold(pwm_value, min_threshold):
 
 def pid_control():
     # Only applies for forward/backward, not turning
-    global left_pwm, right_pwm, left_count, right_count, use_PID, KP, KI, KD, prev_movement, current_movement
+    global left_pwm, right_pwm, left_count, right_count, use_PID, KP, KI, KD, prev_movement, current_movement, KP_R, KI_R, KD_R
     
     integral = 0
     last_error = 0
@@ -358,8 +358,8 @@ def pid_config_server():
             
             try:
                 # Receive PID constants (4 floats)
-                data = client_socket.recv(128)
-                if data and len(data) == 128:
+                data = client_socket.recv(28)
+                if data and len(data) == 28:
                     use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!fffffff", data)
                     if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD},KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
                     else: print("The robot is not using PID.")
