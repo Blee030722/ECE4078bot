@@ -358,8 +358,8 @@ def pid_config_server():
             
             try:
                 # Receive PID constants (4 floats)
-                data = client_socket.recv(16)
-                if data and len(data) == 16:
+                data = client_socket.recv(128)
+                if data and len(data) == 128:
                     use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!fffffff", data)
                     if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD},KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
                     else: print("The robot is not using PID.")
