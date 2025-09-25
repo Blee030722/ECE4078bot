@@ -25,8 +25,8 @@ RIGHT_ENCODER = 16
 
 # PID Constants (default values, will be overridden by client)
 use_PID = 0
-KP, Ki, KD = 0,0,0
-KP_R, Ki_R, KD_R = 0,0,0
+KP, KI, KD = 0, 0, 0
+KP_R, KI_R, KD_R = 0, 0, 0
 MAX_CORRECTION = 30  # Maximum PWM correction value
 
 # Global variables
@@ -200,30 +200,12 @@ def pid_control():
                 target_left_pwm = left_pwm - correction
                 target_right_pwm = right_pwm + correction               
             else:
-                # # Turning PID
-                integral = 0  # optional: separate integral for turning if needed
-                last_error = 0  # optional
-                
-                # Error = difference between left and right encoder counts
-                error = left_count - right_count
-                proportional = KP_R * error
-                integral += KI_R * error * dt
-                integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
-                derivative = KD_R * (error - last_error) / dt if dt > 0 else 0
-                correction = proportional + integral + derivative
-                correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
-                last_error = error
-                # For turning, apply correction differently:
-                # Example: reduce one wheel and increase the other
-                target_left_pwm = left_pwm - correction
-                target_right_pwm = right_pwm + correction
-                
-                # # Reset when stopped or turning
-                # integral = 0
-                # last_error = 0
-                # reset_encoder()
-                # target_left_pwm = left_pwm
-                # target_right_pwm = right_pwm
+                # Reset when stopped or turning
+                integral = 0
+                last_error = 0
+                reset_encoder()
+                target_left_pwm = left_pwm
+                target_right_pwm = right_pwm
         
         if use_ramping and use_PID:
             # PWM Ramping Logic
@@ -293,6 +275,7 @@ def pid_control():
         
         time.sleep(0.01)
 
+
 def camera_stream_server():
     # Initialize camera
     picam2 = Picamera2()
@@ -341,7 +324,7 @@ def camera_stream_server():
 
 
 def pid_config_server():
-    global use_PID, KP, KI, KD, KP_R, KI_R, KD_R
+    global use_PID, KP, KI, KD
     
     # Create socket for receiving PID configuration
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -359,8 +342,8 @@ def pid_config_server():
                 # Receive PID constants (4 floats)
                 data = client_socket.recv(28)
                 if data and len(data) == 28:
-                    use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!fffffff", data)
-                    if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD},KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
+                    use_PID, KP, KI, KD, KP_R, Ki_R, KD_R = struct.unpack("!fffffff", data)
+                    if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD}, KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
                     else: print("The robot is not using PID.")
                     
                     # Send acknowledgment (1 for success)
@@ -411,7 +394,7 @@ def wheel_server():
                     
                     # Unpack speed values and convert to PWM
                     left_speed, right_speed = struct.unpack("!ff", data)
-                    # print(f"Received wheel: left_speed={left_speed:.4f}, right_speed={right_speed:.4f}")
+                    print(f"Received wheel: left_speed={left_speed:.4f}, right_speed={right_speed:.4f}")
                     left_pwm, right_pwm = left_speed*100, right_speed*100
                     
                     # Send encoder counts back
