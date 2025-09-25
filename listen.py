@@ -101,7 +101,7 @@ def reset_encoder():
 def set_motors(left, right):
     global prev_movement, current_movement
     
-    # Pre-Start Kick (Motor Priming), to reduce initial jerk and slight orientation change
+    # Pre-Start KIck (Motor Priming), to reduce initial jerk and slight orientation change
     if prev_movement == 'stop' and current_movement in ['forward', 'backward']:
         if current_movement  == 'forward':
             GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
@@ -126,7 +126,7 @@ def set_motors(left, right):
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
         right_motor_pwm.ChangeDutyCycle(min(abs(right), 100))
     else:
-        # when pwm = 0, implement Active Braking mode, better than putting duty cycle to 0 which may cause uneven stopping
+        # when pwm = 0, implement Active BraKIng mode, better than putting duty cycle to 0 which may cause uneven stopping
         GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
         right_motor_pwm.ChangeDutyCycle(100)
@@ -154,126 +154,269 @@ def apply_min_threshold(pwm_value, min_threshold):
     else:
         return pwm_value
 
-def pid_control():
-    # Only applies for forward/backward, not turning
-    global left_pwm, right_pwm, left_count, right_count, use_PID, KP, KI, KD, prev_movement, current_movement, KP_R, KI_R, KD_R
+# def pid_control():
+#     # Only applies for forward/backward, not turning
+#     global left_pwm, right_pwm, left_count, right_count, use_PID, KP, KI, KD, prev_movement, current_movement, KP_R, KI_R, KD_R
     
-    integral = 0
-    last_error = 0
-    last_time = monotonic()
+#     integral = 0
+#     last_error = 0
+#     last_time = monotonic()
     
-    # Ramping variables & params
-    ramp_left_pwm = 0
-    ramp_right_pwm = 0
-    previous_left_target = 0
-    previous_right_target = 0
+#     # Ramping variables & params
+#     ramp_left_pwm = 0
+#     ramp_right_pwm = 0
+#     previous_left_target = 0
+#     previous_right_target = 0
     
-    while running:          
-        current_time = monotonic()
-        dt = current_time - last_time
-        last_time = current_time
+#     while running:          
+#         current_time = monotonic()
+#         dt = current_time - last_time
+#         last_time = current_time
         
-        prev_movement = current_movement
-        if (left_pwm > 0 and right_pwm > 0): current_movement = 'forward'
-        elif (left_pwm < 0 and right_pwm < 0): current_movement = 'backward'
-        elif (left_pwm == 0 and right_pwm == 0): current_movement = 'stop'
-        else: current_movement = 'turn'
+#         prev_movement = current_movement
+#         if (left_pwm > 0 and right_pwm > 0): current_movement = 'forward'
+#         elif (left_pwm < 0 and right_pwm < 0): current_movement = 'backward'
+#         elif (left_pwm == 0 and right_pwm == 0): current_movement = 'stop'
+#         else: current_movement = 'turn'
         
-        if not use_PID:
-            target_left_pwm = left_pwm
-            target_right_pwm = right_pwm
-        else:
-            if current_movement == 'forward' or current_movement == 'backward':
+#         if not use_PID:
+#             target_left_pwm = left_pwm
+#             target_right_pwm = right_pwm
+#         else:
+#             if current_movement == 'forward' or current_movement == 'backward':
                 
+#                 error = left_count - right_count
+#                 proportional = KP * error
+#                 integral += KI * error * dt
+#                 integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
+#                 derivative = KD * (error - last_error) / dt if dt > 0 else 0
+#                 correction = proportional + integral + derivative
+#                 correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
+#                 last_error = error
+                            
+#                 if current_movement == 'backward':
+#                     correction = -correction
+
+#                 target_left_pwm = left_pwm - correction
+#                 target_right_pwm = right_pwm + correction               
+#             else:
+#                 # Reset when stopped or turning
+#                 integral = 0
+#                 last_error = 0
+#                 reset_encoder()
+#                 target_left_pwm = left_pwm
+#                 target_right_pwm = right_pwm
+        
+#         if use_ramping and use_PID:
+#             # PWM Ramping Logic
+#             max_change_per_cycle = RAMP_RATE * dt
+            
+#             # Calculate differences for both motors
+#             left_diff = target_left_pwm - ramp_left_pwm
+#             right_diff = target_right_pwm - ramp_right_pwm
+            
+#             # Determine if either motor needs ramping
+#             left_needs_ramp = abs(left_diff) > MIN_RAMP_THRESHOLD
+#             right_needs_ramp = abs(right_diff) > MIN_RAMP_THRESHOLD
+            
+#             # Check for direction change conditions (but not stops)
+#             left_direction_change = (target_left_pwm * previous_left_target < 0) and target_left_pwm != 0 and previous_left_target != 0
+#             right_direction_change = (target_right_pwm * previous_right_target < 0) and target_right_pwm != 0 and previous_right_target != 0
+            
+#             # Apply immediate changes for direction changes only (for safety)
+#             if left_direction_change:
+#                 ramp_left_pwm = target_left_pwm
+#             if right_direction_change:
+#                 ramp_right_pwm = target_right_pwm
+            
+#             # Synchronized ramping - both motors ramp together or not at all
+#             if not left_direction_change and not right_direction_change:
+#                 if left_needs_ramp or right_needs_ramp:
+                    
+#                     # Left motor ramping (including ramp-down to zero)
+#                     if abs(left_diff) <= max_change_per_cycle:
+#                         ramp_left_pwm = target_left_pwm  # Close enough, set to target
+#                     else:
+#                         # Ramp towards target (up or down)
+#                         if left_diff > 0:
+#                             ramp_left_pwm += max_change_per_cycle
+#                         else:
+#                             ramp_left_pwm -= max_change_per_cycle
+                    
+#                     # Right motor ramping (including ramp-down to zero)
+#                     if abs(right_diff) <= max_change_per_cycle:
+#                         ramp_right_pwm = target_right_pwm  # Close enough, set to target
+#                     else:
+#                         # Ramp towards target (up or down)
+#                         if right_diff > 0:
+#                             ramp_right_pwm += max_change_per_cycle
+#                         else:
+#                             ramp_right_pwm -= max_change_per_cycle
+#                 else:
+#                     # Neither motor needs ramping - apply targets directly
+#                     ramp_left_pwm = target_left_pwm
+#                     ramp_right_pwm = target_right_pwm
+            
+#             # Store previous targets for next iteration
+#             previous_left_target = target_left_pwm
+#             previous_right_target = target_right_pwm
+        
+#         else:
+#             # Ramping disabled - apply target values directly
+#             ramp_left_pwm = target_left_pwm
+#             ramp_right_pwm = target_right_pwm
+            
+#         final_left_pwm = apply_min_threshold(ramp_left_pwm, MIN_PWM_THRESHOLD)
+#         final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
+#         set_motors(final_left_pwm, final_right_pwm)
+        
+#         if ramp_left_pwm != 0: # print for debugging purpose
+#             print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), (Left Enc, Right Enc)=({left_count}, {right_count})")
+        
+#         time.sleep(0.01)
+
+# --- Replace the pid_control() function with this updated version ---
+def pid_control():
+    # Only applies for forward/backward (linear), and separate PID for turning
+    global left_pwm, right_pwm, left_count, right_count
+    global use_PID, KP, KI, KD, KP_R, KI_R, KD_R, prev_movement, current_movement
+
+    # Linear PID state
+    integral = 0.0
+    last_error = 0.0
+
+    # Turn PID state (separate so it doesn't affect linear PID)
+    integral_turn = 0.0
+    last_error_turn = 0.0
+
+    last_time = monotonic()
+
+    # Ramping variables & params
+    ramp_left_pwm = 0.0
+    ramp_right_pwm = 0.0
+    previous_left_target = 0.0
+    previous_right_target = 0.0
+
+    while running:
+        current_time = monotonic()
+        dt = current_time - last_time if current_time - last_time > 0 else 1e-6
+        last_time = current_time
+
+        prev_movement = current_movement
+        if (left_pwm > 0 and right_pwm > 0):
+            current_movement = 'forward'
+        elif (left_pwm < 0 and right_pwm < 0):
+            current_movement = 'backward'
+        elif (left_pwm == 0 and right_pwm == 0):
+            current_movement = 'stop'
+        else:
+            current_movement = 'turn'
+
+        # Default targets are the raw commanded PWMs
+        target_left_pwm = left_pwm
+        target_right_pwm = right_pwm
+
+        if use_PID:
+            if current_movement == 'forward' or current_movement == 'backward':
+                # --- Linear PID (unchanged logic but with clear state vars) ---
                 error = left_count - right_count
                 proportional = KP * error
                 integral += KI * error * dt
                 integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
-                derivative = KD * (error - last_error) / dt if dt > 0 else 0
+                derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
                 correction = proportional + integral + derivative
                 correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
                 last_error = error
-                            
+
                 if current_movement == 'backward':
                     correction = -correction
 
                 target_left_pwm = left_pwm - correction
-                target_right_pwm = right_pwm + correction               
+                target_right_pwm = right_pwm + correction
+
+            elif current_movement == 'turn':
+                # --- Turn PID (new, separate from linear PID) ---
+                # We use encoder difference to stabilize/shape the turn.
+                # For turning, encoder counts will move in opposite directions; we
+                # define turn_error so that positive error means left wheel ahead.
+                turn_error = left_count + right_count  # sum or diff: use sum since encoders tick opposite on pivot
+                # Note: your encoder wiring and sign convention may require changing above
+                proportional_t = KP_R * turn_error
+                integral_turn += KI_R * turn_error * dt
+                integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
+                derivative_t = KD_R * (turn_error - last_error_turn) / dt if dt > 0 else 0.0
+                correction_turn = proportional_t + integral_turn + derivative_t
+                correction_turn = max(-MAX_CORRECTION, min(correction_turn, MAX_CORRECTION))
+                last_error_turn = turn_error
+
+                # Apply correction to targets: pushing left and right in opposite sense
+                # so that the commanded turning PWMs are adjusted to follow the desired turn profile.
+                # Adjust signs if your encoder convention differs.
+                target_left_pwm = left_pwm - correction_turn
+                target_right_pwm = right_pwm + correction_turn
+
             else:
-                # Reset when stopped or turning
-                integral = 0
-                last_error = 0
+                # stopped: reset PID states and encoders
+                integral = 0.0
+                last_error = 0.0
+                integral_turn = 0.0
+                last_error_turn = 0.0
                 reset_encoder()
                 target_left_pwm = left_pwm
                 target_right_pwm = right_pwm
-        
+
+        # Ramp logic (unchanged except it uses target_* computed above)
         if use_ramping and use_PID:
-            # PWM Ramping Logic
             max_change_per_cycle = RAMP_RATE * dt
-            
-            # Calculate differences for both motors
+
             left_diff = target_left_pwm - ramp_left_pwm
             right_diff = target_right_pwm - ramp_right_pwm
-            
-            # Determine if either motor needs ramping
+
             left_needs_ramp = abs(left_diff) > MIN_RAMP_THRESHOLD
             right_needs_ramp = abs(right_diff) > MIN_RAMP_THRESHOLD
-            
-            # Check for direction change conditions (but not stops)
+
             left_direction_change = (target_left_pwm * previous_left_target < 0) and target_left_pwm != 0 and previous_left_target != 0
             right_direction_change = (target_right_pwm * previous_right_target < 0) and target_right_pwm != 0 and previous_right_target != 0
-            
-            # Apply immediate changes for direction changes only (for safety)
+
             if left_direction_change:
                 ramp_left_pwm = target_left_pwm
             if right_direction_change:
                 ramp_right_pwm = target_right_pwm
-            
-            # Synchronized ramping - both motors ramp together or not at all
+
             if not left_direction_change and not right_direction_change:
                 if left_needs_ramp or right_needs_ramp:
-                    
-                    # Left motor ramping (including ramp-down to zero)
+                    # Left motor ramping
                     if abs(left_diff) <= max_change_per_cycle:
-                        ramp_left_pwm = target_left_pwm  # Close enough, set to target
+                        ramp_left_pwm = target_left_pwm
                     else:
-                        # Ramp towards target (up or down)
-                        if left_diff > 0:
-                            ramp_left_pwm += max_change_per_cycle
-                        else:
-                            ramp_left_pwm -= max_change_per_cycle
-                    
-                    # Right motor ramping (including ramp-down to zero)
+                        ramp_left_pwm += max_change_per_cycle if left_diff > 0 else -max_change_per_cycle
+
+                    # Right motor ramping
                     if abs(right_diff) <= max_change_per_cycle:
-                        ramp_right_pwm = target_right_pwm  # Close enough, set to target
+                        ramp_right_pwm = target_right_pwm
                     else:
-                        # Ramp towards target (up or down)
-                        if right_diff > 0:
-                            ramp_right_pwm += max_change_per_cycle
-                        else:
-                            ramp_right_pwm -= max_change_per_cycle
+                        ramp_right_pwm += max_change_per_cycle if right_diff > 0 else -max_change_per_cycle
                 else:
-                    # Neither motor needs ramping - apply targets directly
                     ramp_left_pwm = target_left_pwm
                     ramp_right_pwm = target_right_pwm
-            
-            # Store previous targets for next iteration
+
             previous_left_target = target_left_pwm
             previous_right_target = target_right_pwm
-        
+
         else:
-            # Ramping disabled - apply target values directly
+            # No ramping: apply target directly
             ramp_left_pwm = target_left_pwm
             ramp_right_pwm = target_right_pwm
-            
+
         final_left_pwm = apply_min_threshold(ramp_left_pwm, MIN_PWM_THRESHOLD)
         final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
         set_motors(final_left_pwm, final_right_pwm)
-        
-        if ramp_left_pwm != 0: # print for debugging purpose
-            print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), (Left Enc, Right Enc)=({left_count}, {right_count})")
-        
+
+        if ramp_left_pwm != 0:  # debug print
+            print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), (Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
+
         time.sleep(0.01)
+# --- end pid_control() replacement ---
 
 
 def camera_stream_server():
@@ -342,7 +485,7 @@ def pid_config_server():
                 # Receive PID constants (4 floats)
                 data = client_socket.recv(28)
                 if data and len(data) == 28:
-                    use_PID, KP, KI, KD, KP_R, Ki_R, KD_R = struct.unpack("!fffffff", data)
+                    use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!fffffff", data)
                     if use_PID: print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD}, KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
                     else: print("The robot is not using PID.")
                     
