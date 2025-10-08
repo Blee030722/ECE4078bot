@@ -289,6 +289,9 @@ def pid_control():
     integral_turn = 0.0
     last_error_turn = 0.0
 
+    lastL = left_count
+    lastR = right_count
+    
     last_time = monotonic()
 
     # Ramping variables & params
