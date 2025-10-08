@@ -319,7 +319,10 @@ def pid_control():
         if use_PID:
             if current_movement == 'forward' or current_movement == 'backward':
                 # --- Linear PID (unchanged logic but with clear state vars) ---
-                error = left_count - right_count
+                curL, curR = left_count, right_count
+                dL, dR = curL - lastL, curR - lastR
+                error = dL - dR
+                # error = left_count - right_count
                 proportional = KP * error
                 integral += KI * error * dt
                 integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
@@ -330,19 +333,20 @@ def pid_control():
 
                 if current_movement == 'backward':
                     correction = -correction
-
+                lastL, lastR = curL, curR
                 target_left_pwm = left_pwm - correction
                 target_right_pwm = right_pwm + correction
-                reset_encoder()
 
             elif current_movement == 'turn':
                 # --- Turn PID (new, separate from linear PID) ---
                 # We use encoder difference to stabilize/shape the turn.
                 # For turning, encoder counts will move in opposite directions; we
                 # define turn_error so that positive error means left wheel ahead.
-                
+                curL, curR = left_count, right_count
+                dL, dR = curL - lastL, curR - lastR
+                turn_error = dL - dR
                 # ... in the loop while turning:
-                turn_error = left_count - right_count  # sum or diff: use sum since encoders tick opposite on pivot
+                # turn_error = left_count - right_count  # sum or diff: use sum since encoders tick opposite on pivot
                 # Note: your encoder wiring and sign convention may require changing above
                 proportional_t = KP_R * turn_error
                 integral_turn += KI_R * turn_error * dt
@@ -351,13 +355,12 @@ def pid_control():
                 correction_turn = proportional_t + integral_turn + derivative_t
                 correction_turn = max(-MAX_CORRECTION, min(correction_turn, MAX_CORRECTION))
                 last_error_turn = turn_error
-
+                lastL, lastR = curL, curR
                 # Apply correction to targets: pushing left and right in opposite sense
                 # so that the commanded turning PWMs are adjusted to follow the desired turn profile.
                 # Adjust signs if your encoder convention differs.
                 target_left_pwm = left_pwm - correction_turn
                 target_right_pwm = right_pwm + correction_turn
-                reset_encoder()
 
             else:
                 # stopped: reset PID states and encoders
