@@ -339,7 +339,15 @@ def pid_control():
                 # We use encoder difference to stabilize/shape the turn.
                 # For turning, encoder counts will move in opposite directions; we
                 # define turn_error so that positive error means left wheel ahead.
-                turn_error = left_count + right_count  # sum or diff: use sum since encoders tick opposite on pivot
+                left_base_turn  = left_count
+                right_base_turn = right_count
+                integral_turn   = 0.0
+                last_error_turn = 0.0
+                
+                # ... in the loop while turning:
+                dL_local = left_count  - left_base_turn
+                dR_local = right_count - right_base_turn
+                turn_error = dL_local + dR_local  # sum or diff: use sum since encoders tick opposite on pivot
                 # Note: your encoder wiring and sign convention may require changing above
                 proportional_t = KP_R * turn_error
                 integral_turn += KI_R * turn_error * dt
@@ -354,6 +362,7 @@ def pid_control():
                 # Adjust signs if your encoder convention differs.
                 target_left_pwm = left_pwm - correction_turn
                 target_right_pwm = right_pwm + correction_turn
+                reset_encoder()
 
             else:
                 # stopped: reset PID states and encoders
