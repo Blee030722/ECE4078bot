@@ -347,7 +347,7 @@ def pid_control():
                 # define turn_error so that positive error means left wheel ahead.
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
-                turn_error = dL - dR
+                turn_error = dL + dR
                 # ... in the loop while turning:
                 # turn_error = left_count - right_count  # sum or diff: use sum since encoders tick opposite on pivot
                 # Note: your encoder wiring and sign convention may require changing above
