@@ -8,7 +8,7 @@ import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 
 # ----------------------
-# Helpers (NEW)
+# Helpers
 # ----------------------
 def recv_all(sock, n):
     """Receive exactly n bytes from a TCP socket or return None if the peer closes early."""
@@ -19,6 +19,10 @@ def recv_all(sock, n):
             return None
         buf += chunk
     return buf
+
+def sgn(x: float) -> int:
+    """Sign function: +1, -1, or 0."""
+    return 1 if x > 0 else (-1 if x < 0 else 0)
 
 # Network Configuration
 HOST = '0.0.0.0'
@@ -37,30 +41,27 @@ LEFT_ENCODER = 26
 RIGHT_ENCODER = 16
 
 # PID Constants (default values, will be overridden by client)
-use_PID = 0
-KP, KI, KD = 0, 0, 0
-KP_R, KI_R, KD_R = 0, 0, 0
+use_PID = 0.0
+KP, KI, KD = 0.0, 0.0, 0.0      # straight-line PID
+KP_R, KI_R, KD_R = 0.0, 0.0, 0.0 # turn (pivot) PID
 MAX_CORRECTION = 30  # Maximum PWM correction value
 
 # Global variables
 running = True
-left_pwm, right_pwm = 0, 0
+left_pwm, right_pwm = 0.0, 0.0
 left_count, right_count = 0, 0
 prev_left_state, prev_right_state = None, None
 use_ramping = True
-RAMP_RATE = 250  # PWM units per second (adjust this value to tune ramp speed)
+RAMP_RATE = 250  # PWM units per second
 MIN_RAMP_THRESHOLD = 15  # Only ramp if change is greater than this
 MIN_PWM_THRESHOLD = 15
 current_movement, prev_movement = 'stop', 'stop'
-
-# Arc detection threshold (NEW): if same sign but magnitudes differ by more than this, treat as arc turning
-ARC_EPS = 5.0
 
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     
-    # Motor
+    # Motor pins
     GPIO.setup(RIGHT_MOTOR_ENA, GPIO.OUT)
     GPIO.setup(RIGHT_MOTOR_IN1, GPIO.OUT)
     GPIO.setup(RIGHT_MOTOR_IN2, GPIO.OUT)
@@ -68,11 +69,11 @@ def setup_gpio():
     GPIO.setup(LEFT_MOTOR_IN3, GPIO.OUT)
     GPIO.setup(LEFT_MOTOR_IN4, GPIO.OUT)
     
-    # This prevents slight motor jerk when connection is established
+    # Prevent slight motor jerk when connection is established
     GPIO.output(RIGHT_MOTOR_ENA, GPIO.LOW)
     GPIO.output(LEFT_MOTOR_ENB, GPIO.LOW)
     
-    # Encoder setup and interrupt (both activated and deactivated)
+    # Encoder setup and interrupts
     GPIO.setup(LEFT_ENCODER, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(RIGHT_ENCODER, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.add_event_detect(LEFT_ENCODER, GPIO.BOTH, callback=left_encoder_callback)
@@ -88,28 +89,22 @@ def setup_gpio():
 def left_encoder_callback(channel):
     global left_count, prev_left_state
     current_state = GPIO.input(LEFT_ENCODER)
-    
-    # Check for actual state change. Without this, false positive happens due to electrical noise
-    # After testing, debouncing not needed
-    if (prev_left_state is not None and current_state != prev_left_state):       
+    # Count only on state changes (reduces false positives)
+    if (prev_left_state is not None and current_state != prev_left_state):
         left_count += 1
         prev_left_state = current_state
-    
     elif prev_left_state is None:
-        # First reading
         prev_left_state = current_state
 
 def right_encoder_callback(channel):
-    global right_count, prev_right_state, prev_right_time
+    global right_count, prev_right_state
     current_state = GPIO.input(RIGHT_ENCODER)
-    
-    if (prev_right_state is not None and current_state != prev_right_state): 
+    if (prev_right_state is not None and current_state != prev_right_state):
         right_count += 1
         prev_right_state = current_state
-        
     elif prev_right_state is None:
         prev_right_state = current_state
-    
+
 def reset_encoder():
     global left_count, right_count
     left_count, right_count = 0, 0
@@ -117,9 +112,9 @@ def reset_encoder():
 def set_motors(left, right):
     global prev_movement, current_movement
     
-    # Pre-Start KIck (Motor Priming), to reduce initial jerk and slight orientation change
+    # Pre-start kick to reduce initial jerk/orientation change
     if prev_movement == 'stop' and current_movement in ['forward', 'backward']:
-        if current_movement  == 'forward':
+        if current_movement == 'forward':
             GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
             GPIO.output(RIGHT_MOTOR_IN2, GPIO.LOW)
             GPIO.output(LEFT_MOTOR_IN3, GPIO.HIGH)
@@ -133,6 +128,7 @@ def set_motors(left, right):
         right_motor_pwm.ChangeDutyCycle(100)
         time.sleep(0.05)
 
+    # Right side
     if right > 0:
         GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.LOW)
@@ -142,11 +138,12 @@ def set_motors(left, right):
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
         right_motor_pwm.ChangeDutyCycle(min(abs(right), 100))
     else:
-        # when pwm = 0, implement Active BraKIng mode, better than putting duty cycle to 0 which may cause uneven stopping
+        # Active braking when pwm=0
         GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
         right_motor_pwm.ChangeDutyCycle(100)
     
+    # Left side
     if left > 0:
         GPIO.output(LEFT_MOTOR_IN3, GPIO.HIGH)
         GPIO.output(LEFT_MOTOR_IN4, GPIO.LOW)
@@ -159,20 +156,19 @@ def set_motors(left, right):
         GPIO.output(LEFT_MOTOR_IN3, GPIO.HIGH)
         GPIO.output(LEFT_MOTOR_IN4, GPIO.HIGH)
         left_motor_pwm.ChangeDutyCycle(100)
-    
-    
+
 def apply_min_threshold(pwm_value, min_threshold):
     if pwm_value == 0:
         return 0  # Zero means stop
     elif abs(pwm_value) < min_threshold:
-        # Boost small values to minimum threshold, preserving direction
         return min_threshold if pwm_value > 0 else -min_threshold
     else:
         return pwm_value
 
-# --- Replace the pid_control() function with this updated version ---
+# ----------------------
+# PID control loop (arc driving removed)
+# ----------------------
 def pid_control():
-    # Only applies for forward/backward (linear), and separate PID for turning
     global left_pwm, right_pwm, left_count, right_count
     global use_PID, KP, KI, KD, KP_R, KI_R, KD_R, prev_movement, current_movement
 
@@ -180,7 +176,7 @@ def pid_control():
     integral = 0.0
     last_error = 0.0
 
-    # Turn/arc PID state (reused for both arc and pivot)
+    # Turn PID state
     integral_turn = 0.0
     last_error_turn = 0.0
 
@@ -189,7 +185,7 @@ def pid_control():
     
     last_time = monotonic()
 
-    # Ramping variables & params
+    # Ramping variables
     ramp_left_pwm = 0.0
     ramp_right_pwm = 0.0
     previous_left_target = 0.0
@@ -201,68 +197,61 @@ def pid_control():
         last_time = current_time
 
         prev_movement = current_movement
-        if (left_pwm > 0 and right_pwm > 0):
-            current_movement = 'forward'
-        elif (left_pwm < 0 and right_pwm < 0):
-            current_movement = 'backward'
-        elif (left_pwm == 0 and right_pwm == 0):
+
+        # Movement mode decided ONLY by signs
+        ls, rs = sgn(left_pwm), sgn(right_pwm)
+        if ls == 0 and rs == 0:
             current_movement = 'stop'
+        elif ls == rs and ls != 0:
+            current_movement = 'forward' if ls > 0 else 'backward'
         else:
             current_movement = 'turn'
 
-        # Default targets are the raw commanded PWMs
+        # Start with the requested commands
         target_left_pwm = left_pwm
         target_right_pwm = right_pwm
 
         if use_PID:
-            if current_movement == 'forward' or current_movement == 'backward':
-                # Detect arc vs straight using magnitude closeness (NEW)
-                magnitudes_close = abs(abs(left_pwm) - abs(right_pwm)) <= ARC_EPS
+            if current_movement in ('forward', 'backward'):
+                # --- FORCE STRAIGHT: equal magnitudes (no arcs) ---
+                base = min(abs(left_pwm), abs(right_pwm))
+                sign_dir = 1 if current_movement == 'forward' else -1
+                target_left_pwm  = base * sign_dir
+                target_right_pwm = base * sign_dir
 
+                # Straight-line PID: equalize encoder ticks (dL == dR)
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
+                error = dL - dR
 
-                if magnitudes_close:
-                    # --- Straight-line linear PID (keep encoder ticks equal) ---
-                    error = dL - dR
-                    proportional = KP * error
-                    integral += KI * error * dt
-                    integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
-                    derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
-                    correction = proportional + integral + derivative
-                    correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
-                    last_error = error
+                proportional = KP * error
+                integral += KI * error * dt
+                integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
+                derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
+                correction = proportional + integral + derivative
+                correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
+                last_error = error
 
-                    if current_movement == 'backward':
-                        correction = -correction
-                    target_left_pwm = left_pwm - correction
-                    target_right_pwm = right_pwm + correction
-                else:
-                    # --- ARC turning (same sign, different magnitudes): ratio-aware correction (NEW) ---
-                    absLcmd = max(abs(left_pwm), 1e-6)
-                    absRcmd = max(abs(right_pwm), 1e-6)
-                    # error zero when dL/|Lcmd| == dR/|Rcmd|
-                    error_arc = dL * absRcmd - dR * absLcmd
+                # Flip correction when going backward
+                if current_movement == 'backward':
+                    correction = -correction
 
-                    proportional_t = KP_R * error_arc
-                    integral_turn += KI_R * error_arc * dt
-                    integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
-                    derivative_t = KD_R * (error_arc - last_error_turn) / dt if dt > 0 else 0.0
-                    correction_arc = proportional_t + integral_turn + derivative_t
-                    correction_arc = max(-MAX_CORRECTION, min(correction_arc, MAX_CORRECTION))
-                    last_error_turn = error_arc
-
-                    target_left_pwm = left_pwm - correction_arc
-                    target_right_pwm = right_pwm + correction_arc
+                target_left_pwm  -= correction
+                target_right_pwm += correction
 
                 lastL, lastR = curL, curR
 
             elif current_movement == 'turn':
-                # --- Pivot turn (opposite signs): keep magnitudes matched ---
+                # Normalize to equal and opposite magnitudes for a clean pivot
+                base = max(abs(left_pwm), abs(right_pwm))
+                target_left_pwm  = -base
+                target_right_pwm =  base
+
+                # Pivot PID: |dL| == |dR| with opposite signs -> dL + dR = 0
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
-                # Positive when magnitudes mismatch; zero when |dL|==|dR| with opposite signs
                 turn_error = dL + dR
+
                 proportional_t = KP_R * turn_error
                 integral_turn += KI_R * turn_error * dt
                 integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
@@ -272,20 +261,20 @@ def pid_control():
                 last_error_turn = turn_error
                 lastL, lastR = curL, curR
 
-                target_left_pwm = left_pwm - correction_turn
-                target_right_pwm = right_pwm + correction_turn
+                target_left_pwm  -= correction_turn
+                target_right_pwm += correction_turn
 
             else:
-                # stopped: reset PID states and encoders
+                # Stopped: reset PID states and encoders
                 integral = 0.0
                 last_error = 0.0
                 integral_turn = 0.0
                 last_error_turn = 0.0
                 reset_encoder()
-                target_left_pwm = left_pwm
-                target_right_pwm = right_pwm
+                target_left_pwm = 0.0
+                target_right_pwm = 0.0
 
-        # Ramp logic (unchanged except it uses target_* computed above)
+        # Ramping (unchanged)
         if use_ramping and use_PID:
             max_change_per_cycle = RAMP_RATE * dt
 
@@ -332,17 +321,20 @@ def pid_control():
         final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
         set_motors(final_left_pwm, final_right_pwm)
 
-        if ramp_left_pwm != 0:  # debug print
-            print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), (Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
+        # Optional debug print
+        if ramp_left_pwm != 0 or ramp_right_pwm != 0:
+            print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), "
+                  f"(Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
 
         time.sleep(0.01)
-# --- end pid_control() replacement ---
 
-
+# ----------------------
+# Camera streaming server
+# ----------------------
 def camera_stream_server():
     # Initialize camera
     picam2 = Picamera2()
-    camera_config = picam2.create_preview_configuration(lores={"size": (640,480)})
+    camera_config = picam2.create_preview_configuration(lores={"size": (640, 480)})
     picam2.configure(camera_config)
     picam2.start()
     
@@ -385,11 +377,12 @@ def camera_stream_server():
     server_socket.close()
     picam2.stop()
 
-
+# ----------------------
+# PID configuration server
+# ----------------------
 def pid_config_server():
-    global use_PID, KP, KI, KD, KP_R, KI_R, KD_R  # (FIXED) ensure turn gains are global
+    global use_PID, KP, KI, KD, KP_R, KI_R, KD_R
     
-    # Create socket for receiving PID configuration
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PID_CONFIG_PORT))
@@ -402,21 +395,17 @@ def pid_config_server():
             print(f"PID config client connected")
             
             try:
-                # Receive PID constants (7 floats: use_PID, KP, KI, KD, KP_R, KI_R, KD_R) => 28 bytes
-                data = recv_all(client_socket, 28)  # (FIXED) robust read
+                # Receive 7 floats: use_PID, KP, KI, KD, KP_R, KI_R, KD_R (network byte order)
+                data = recv_all(client_socket, 28)
                 if data and len(data) == 28:
                     use_PID, KP, KI, KD, KP_R, KI_R, KD_R = struct.unpack("!fffffff", data)
-                    if use_PID: 
+                    if use_PID:
                         print(f"Updated PID constants: KP={KP}, KI={KI}, KD={KD}, KP_R={KP_R}, KI_R={KI_R}, KD_R={KD_R}")
-                    else: 
+                    else:
                         print("The robot is not using PID.")
-                    
-                    # Send acknowledgment (1 for success)
                     response = struct.pack("!i", 1)
                 else:
-                    # Send failure response
                     response = struct.pack("!i", 0)
-                
                 client_socket.sendall(response)
                     
             except Exception as e:
@@ -433,8 +422,10 @@ def pid_config_server():
             print(f"PID config server error: {str(e)}")
     
     server_socket.close()
-    
 
+# ----------------------
+# Wheel command server
+# ----------------------
 def wheel_server():
     global left_pwm, right_pwm, running, left_count, right_count
     
@@ -451,16 +442,15 @@ def wheel_server():
             
             while running:
                 try:
-                    # Receive speed (4 bytes for each value) => 8 bytes total
-                    data = recv_all(client_socket, 8)  # (FIXED) robust read
+                    # Receive two floats (left_speed, right_speed) in range [-1,1]
+                    data = recv_all(client_socket, 8)
                     if not data:
                         print("Wheel client disconnected during recv")
                         break
                     
-                    # Unpack speed values and convert to PWM
                     left_speed, right_speed = struct.unpack("!ff", data)
                     print(f"Received wheel: left_speed={left_speed:.4f}, right_speed={right_speed:.4f}")
-                    left_pwm, right_pwm = left_speed*100, right_speed*100
+                    left_pwm, right_pwm = left_speed * 100.0, right_speed * 100.0
                     
                     # Send encoder counts back
                     response = struct.pack("!ii", left_count, right_count)
@@ -478,24 +468,23 @@ def wheel_server():
     
     server_socket.close()
 
-
+# ----------------------
+# Main
+# ----------------------
 def main():
     try:
         setup_gpio()
         
         # Start PID control thread
-        pid_thread = threading.Thread(target=pid_control)
-        pid_thread.daemon = True
+        pid_thread = threading.Thread(target=pid_control, daemon=True)
         pid_thread.start()
         
         # Start camera streaming thread
-        camera_thread = threading.Thread(target=camera_stream_server)
-        camera_thread.daemon = True
+        camera_thread = threading.Thread(target=camera_stream_server, daemon=True)
         camera_thread.start()
         
         # Start PID configuration server thread
-        pid_config_thread = threading.Thread(target=pid_config_server)
-        pid_config_thread.daemon = True
+        pid_config_thread = threading.Thread(target=pid_config_server, daemon=True)
         pid_config_thread.start()
         
         # Start wheel server (main thread)
@@ -508,7 +497,6 @@ def main():
         running = False
         GPIO.cleanup()
         print("Cleanup complete")
-
 
 if __name__ == "__main__":
     main()
