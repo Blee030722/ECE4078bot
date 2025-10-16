@@ -242,12 +242,24 @@ def pid_control():
                 lastL, lastR = curL, curR
 
             elif current_movement == 'turn':
-                # Normalize to equal and opposite magnitudes for a clean pivot
+                # --- Preserve requested turn direction ---
+                # Use the larger magnitude, then set equal-and-opposite magnitudes
                 base = max(abs(left_pwm), abs(right_pwm))
-                target_left_pwm  = -base
-                target_right_pwm =  base
 
-                # Pivot PID: |dL| == |dR| with opposite signs -> dL + dR = 0
+                # Signs of incoming commands
+                ls, rs = sgn(left_pwm), sgn(right_pwm)
+
+                # If one side is zero, make it the opposite sign of the other so it pivots
+                if ls == 0 and rs != 0:
+                    ls = -rs
+                if rs == 0 and ls != 0:
+                    rs = -ls
+
+                # Now ls and rs are opposite signs; keep that direction
+                target_left_pwm  = base * ls
+                target_right_pwm = base * rs
+
+                # ----- Pivot PID: want |dL| == |dR| with opposite signs -> dL + dR = 0 -----
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
                 turn_error = dL + dR
@@ -261,6 +273,7 @@ def pid_control():
                 last_error_turn = turn_error
                 lastL, lastR = curL, curR
 
+                # Apply correction symmetrically
                 target_left_pwm  -= correction_turn
                 target_right_pwm += correction_turn
 
