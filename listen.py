@@ -57,6 +57,14 @@ MIN_RAMP_THRESHOLD = 15  # Only ramp if change is greater than this
 MIN_PWM_THRESHOLD = 15
 current_movement, prev_movement = 'stop', 'stop'
 
+# NEW: cap straight-mode differential so you never get 51/15-type splits
+STRAIGHT_MAX_DELTA = 4.0  # per side; raise to 6–8 if you need more authority
+
+# NEW: encoder dead-time (filters bounce/EMI bursts that cause sudden count jumps)
+ENC_DEADTIME_NS = 1_000_000  # 1.0 ms; tune 0.5–3.0 ms as needed
+_left_last_ns = 0
+_right_last_ns = 0
+
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
@@ -76,6 +84,7 @@ def setup_gpio():
     # Encoder setup and interrupts
     GPIO.setup(LEFT_ENCODER, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(RIGHT_ENCODER, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    # Keep BOTH (no change to your API), but callbacks implement dead-time filter
     GPIO.add_event_detect(LEFT_ENCODER, GPIO.BOTH, callback=left_encoder_callback)
     GPIO.add_event_detect(RIGHT_ENCODER, GPIO.BOTH, callback=right_encoder_callback)
     
@@ -87,23 +96,33 @@ def setup_gpio():
     right_motor_pwm.start(0)
 
 def left_encoder_callback(channel):
-    global left_count, prev_left_state
+    global left_count, prev_left_state, _left_last_ns
+    now = time.monotonic_ns()
+    if now - _left_last_ns < ENC_DEADTIME_NS:
+        return  # ignore bounce / too-fast edges
     current_state = GPIO.input(LEFT_ENCODER)
-    # Count only on state changes (reduces false positives)
+    # Count only on state changes (reduces double-count on BOTH)
     if (prev_left_state is not None and current_state != prev_left_state):
         left_count += 1
         prev_left_state = current_state
+        _left_last_ns = now
     elif prev_left_state is None:
         prev_left_state = current_state
+        _left_last_ns = now
 
 def right_encoder_callback(channel):
-    global right_count, prev_right_state
+    global right_count, prev_right_state, _right_last_ns
+    now = time.monotonic_ns()
+    if now - _right_last_ns < ENC_DEADTIME_NS:
+        return
     current_state = GPIO.input(RIGHT_ENCODER)
     if (prev_right_state is not None and current_state != prev_right_state):
         right_count += 1
         prev_right_state = current_state
+        _right_last_ns = now
     elif prev_right_state is None:
         prev_right_state = current_state
+        _right_last_ns = now
 
 def reset_encoder():
     global left_count, right_count
@@ -112,7 +131,7 @@ def reset_encoder():
 def set_motors(left, right):
     global prev_movement, current_movement
     
-    # Pre-start kick to reduce initial jerk/orientation change
+    # Pre-start kick to reduce initial jerk/orientation change (unchanged)
     if prev_movement == 'stop' and current_movement in ['forward', 'backward']:
         if current_movement == 'forward':
             GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
@@ -166,181 +185,8 @@ def apply_min_threshold(pwm_value, min_threshold):
         return pwm_value
 
 # ----------------------
-# PID control loop (arc driving removed)
+# PID control loop (with straight differential clamp + encoder dead-time)
 # ----------------------
-# def pid_control():
-#     global left_pwm, right_pwm, left_count, right_count
-#     global use_PID, KP, KI, KD, KP_R, KI_R, KD_R, prev_movement, current_movement
-
-#     # Linear PID state
-#     integral = 0.0
-#     last_error = 0.0
-
-#     # Turn PID state
-#     integral_turn = 0.0
-#     last_error_turn = 0.0
-
-#     lastL = left_count
-#     lastR = right_count
-    
-#     last_time = monotonic()
-
-#     # Ramping variables
-#     ramp_left_pwm = 0.0
-#     ramp_right_pwm = 0.0
-#     previous_left_target = 0.0
-#     previous_right_target = 0.0
-
-#     while running:
-#         current_time = monotonic()
-#         dt = current_time - last_time if current_time - last_time > 0 else 1e-6
-#         last_time = current_time
-
-#         prev_movement = current_movement
-
-#         # Movement mode decided ONLY by signs
-#         ls, rs = sgn(left_pwm), sgn(right_pwm)
-#         if ls == 0 and rs == 0:
-#             current_movement = 'stop'
-#         elif ls == rs and ls != 0:
-#             current_movement = 'forward' if ls > 0 else 'backward'
-#         else:
-#             current_movement = 'turn'
-
-#         # Start with the requested commands
-#         target_left_pwm = left_pwm
-#         target_right_pwm = right_pwm
-
-#         if use_PID:
-#             if current_movement in ('forward', 'backward'):
-#                 # --- FORCE STRAIGHT: equal magnitudes (no arcs) ---
-#                 base = min(abs(left_pwm), abs(right_pwm))
-#                 sign_dir = 1 if current_movement == 'forward' else -1
-#                 target_left_pwm  = base * sign_dir
-#                 target_right_pwm = base * sign_dir
-
-#                 # Straight-line PID: equalize encoder ticks (dL == dR)
-#                 curL, curR = left_count, right_count
-#                 dL, dR = curL - lastL, curR - lastR
-#                 error = dL - dR
-
-#                 proportional = KP * error
-#                 integral += KI * error * dt
-#                 integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
-#                 derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
-#                 correction = proportional + integral + derivative
-#                 correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
-#                 last_error = error
-
-#                 # Flip correction when going backward
-#                 if current_movement == 'backward':
-#                     correction = -correction
-
-#                 target_left_pwm  -= correction
-#                 target_right_pwm += correction
-
-#                 lastL, lastR = curL, curR
-
-#             elif current_movement == 'turn':
-#                 # --- Preserve requested turn direction ---
-#                 # Use the larger magnitude, then set equal-and-opposite magnitudes
-#                 base = max(abs(left_pwm), abs(right_pwm))
-
-#                 # Signs of incoming commands
-#                 ls, rs = sgn(left_pwm), sgn(right_pwm)
-
-#                 # If one side is zero, make it the opposite sign of the other so it pivots
-#                 if ls == 0 and rs != 0:
-#                     ls = -rs
-#                 if rs == 0 and ls != 0:
-#                     rs = -ls
-
-#                 # Now ls and rs are opposite signs; keep that direction
-#                 target_left_pwm  = base * ls
-#                 target_right_pwm = base * rs
-
-#                 # ----- Pivot PID: want |dL| == |dR| with opposite signs -> dL + dR = 0 -----
-#                 curL, curR = left_count, right_count
-#                 dL, dR = curL - lastL, curR - lastR
-#                 turn_error = dL + dR
-
-#                 proportional_t = KP_R * turn_error
-#                 integral_turn += KI_R * turn_error * dt
-#                 integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
-#                 derivative_t = KD_R * (turn_error - last_error_turn) / dt if dt > 0 else 0.0
-#                 correction_turn = proportional_t + integral_turn + derivative_t
-#                 correction_turn = max(-MAX_CORRECTION, min(correction_turn, MAX_CORRECTION))
-#                 last_error_turn = turn_error
-#                 lastL, lastR = curL, curR
-
-#                 # Apply correction symmetrically
-#                 target_left_pwm  -= correction_turn
-#                 target_right_pwm += correction_turn
-
-#             else:
-#                 # Stopped: reset PID states and encoders
-#                 integral = 0.0
-#                 last_error = 0.0
-#                 integral_turn = 0.0
-#                 last_error_turn = 0.0
-#                 reset_encoder()
-#                 target_left_pwm = 0.0
-#                 target_right_pwm = 0.0
-
-#         # Ramping (unchanged)
-#         if use_ramping and use_PID:
-#             max_change_per_cycle = RAMP_RATE * dt
-
-#             left_diff = target_left_pwm - ramp_left_pwm
-#             right_diff = target_right_pwm - ramp_right_pwm
-
-#             left_needs_ramp = abs(left_diff) > MIN_RAMP_THRESHOLD
-#             right_needs_ramp = abs(right_diff) > MIN_RAMP_THRESHOLD
-
-#             left_direction_change = (target_left_pwm * previous_left_target < 0) and target_left_pwm != 0 and previous_left_target != 0
-#             right_direction_change = (target_right_pwm * previous_right_target < 0) and target_right_pwm != 0 and previous_right_target != 0
-
-#             if left_direction_change:
-#                 ramp_left_pwm = target_left_pwm
-#             if right_direction_change:
-#                 ramp_right_pwm = target_right_pwm
-
-#             if not left_direction_change and not right_direction_change:
-#                 if left_needs_ramp or right_needs_ramp:
-#                     # Left motor ramping
-#                     if abs(left_diff) <= max_change_per_cycle:
-#                         ramp_left_pwm = target_left_pwm
-#                     else:
-#                         ramp_left_pwm += max_change_per_cycle if left_diff > 0 else -max_change_per_cycle
-
-#                     # Right motor ramping
-#                     if abs(right_diff) <= max_change_per_cycle:
-#                         ramp_right_pwm = target_right_pwm
-#                     else:
-#                         ramp_right_pwm += max_change_per_cycle if right_diff > 0 else -max_change_per_cycle
-#                 else:
-#                     ramp_left_pwm = target_left_pwm
-#                     ramp_right_pwm = target_right_pwm
-
-#             previous_left_target = target_left_pwm
-#             previous_right_target = target_right_pwm
-
-#         else:
-#             # No ramping: apply target directly
-#             ramp_left_pwm = target_left_pwm
-#             ramp_right_pwm = target_right_pwm
-
-#         final_left_pwm = apply_min_threshold(ramp_left_pwm, MIN_PWM_THRESHOLD)
-#         final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
-#         set_motors(final_left_pwm, final_right_pwm)
-
-#         # Optional debug print
-#         if ramp_left_pwm != 0 or ramp_right_pwm != 0:
-#             print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), "
-#                   f"(Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
-
-#         time.sleep(0.01)
-
 def pid_control():
     global left_pwm, right_pwm, left_count, right_count
     global use_PID, KP, KI, KD, KP_R, KI_R, KD_R, prev_movement, current_movement
@@ -371,7 +217,7 @@ def pid_control():
 
         prev_movement = current_movement
 
-        # Decide mode ONLY by signs
+        # Movement mode decided ONLY by signs of commanded wheel speeds
         ls, rs = sgn(left_pwm), sgn(right_pwm)
         if ls == 0 and rs == 0:
             current_movement = 'stop'
@@ -380,44 +226,26 @@ def pid_control():
         else:
             current_movement = 'turn'
 
-        # Reset integrators on mode change to avoid windup-led flips
+        # Reset integrators on mode change (prevents windup flips after a spike)
         if current_movement != prev_movement:
             integral = 0.0
             last_error = 0.0
             integral_turn = 0.0
             last_error_turn = 0.0
 
-        # --- ALWAYS normalize to kill arcs, even before PID ---
-        if current_movement in ('forward', 'backward'):
-            base = min(abs(left_pwm), abs(right_pwm))
-            sign_dir = 1 if current_movement == 'forward' else -1
-            target_left_pwm  = base * sign_dir
-            target_right_pwm = base * sign_dir
+        # Start with the requested commands
+        target_left_pwm = left_pwm
+        target_right_pwm = right_pwm
 
-        elif current_movement == 'turn':
-            base = max(abs(left_pwm), abs(right_pwm))
-
-            # Keep requested turn direction; if one side is zero, make it opposite of the other
-            turn_ls, turn_rs = ls, rs
-            if turn_ls == 0 and turn_rs != 0:
-                turn_ls = -turn_rs
-            if turn_rs == 0 and turn_ls != 0:
-                turn_rs = -turn_ls
-            # Ensure opposite signs for a clean pivot
-            if turn_ls == turn_rs and turn_ls != 0:
-                turn_rs = -turn_ls
-
-            target_left_pwm  = base * turn_ls
-            target_right_pwm = base * turn_rs
-
-        else:
-            target_left_pwm = 0.0
-            target_right_pwm = 0.0
-
-        # ---------- PID (applies on top of normalized targets) ----------
         if use_PID:
             if current_movement in ('forward', 'backward'):
-                # Straight-line PID: want dL == dR
+                # --- FORCE STRAIGHT: equal magnitudes (no arcs by command) ---
+                base = min(abs(left_pwm), abs(right_pwm))
+                sign_dir = 1 if current_movement == 'forward' else -1
+                target_left_pwm  = base * sign_dir
+                target_right_pwm = base * sign_dir
+
+                # Straight-line PID: equalize encoder ticks (dL == dR)
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
                 error = dL - dR
@@ -427,34 +255,59 @@ def pid_control():
                 integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
                 derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
                 correction = proportional + integral + derivative
-                correction = max(-MAX_CORRECTION, min(correction, MAX_CORRECTION))
                 last_error = error
 
-                # LIMIT correction so it cannot flip a wheel's sign
-                max_corr = max(0.0, min(abs(target_left_pwm), abs(target_right_pwm)) - MIN_PWM_THRESHOLD)
-                correction = max(-max_corr, min(correction, max_corr))
+                # How much differential can we apply around 'base' without clipping?
+                span_min = max(0.0, base - MIN_PWM_THRESHOLD)
+                span_max = max(0.0, 100.0 - base)
+                span = min(span_min, span_max)  # symmetric room
 
-                # If going backward, flip correction so "straight" stays straight
-                if current_movement == 'backward':
+                # Absolute cap to avoid visible curves (prevents 51/15)
+                delta_cap = min(span, STRAIGHT_MAX_DELTA)
+
+                # Clamp correction into +/- delta_cap
+                correction = max(-delta_cap, min(correction, delta_cap))
+
+                # If going backward, flip correction sign so "straight" stays straight
+                if sign_dir < 0:
                     correction = -correction
 
-                # Apply correction
-                target_left_pwm  -= correction
-                target_right_pwm += correction
+                # Apply *symmetric* differential around the base
+                L = base - correction
+                R = base + correction
 
-                # STRAIGHT SIGN GUARD: keep both same sign as direction (+/+ or -/-)
-                sign_dir = 1 if current_movement == 'forward' else -1
-                target_left_pwm  = sign_dir * max(MIN_PWM_THRESHOLD, min(100.0, abs(target_left_pwm)))
-                target_right_pwm = sign_dir * max(MIN_PWM_THRESHOLD, min(100.0, abs(target_right_pwm)))
+                # Guard rails
+                L = max(MIN_PWM_THRESHOLD, min(100.0, L))
+                R = max(MIN_PWM_THRESHOLD, min(100.0, R))
+
+                target_left_pwm  = L * sign_dir
+                target_right_pwm = R * sign_dir
 
                 lastL, lastR = curL, curR
 
             elif current_movement == 'turn':
-                # Pivot PID: match magnitudes (safe for single-channel encoders)
+                # --- Preserve requested turn direction ---
+                # Use the larger magnitude, then set equal-and-opposite magnitudes
+                base = max(abs(left_pwm), abs(right_pwm))
+
+                # Signs of incoming commands
+                turn_ls, turn_rs = sgn(left_pwm), sgn(right_pwm)
+
+                # If one side is zero, make it the opposite sign of the other so it pivots
+                if turn_ls == 0 and turn_rs != 0:
+                    turn_ls = -turn_rs
+                if turn_rs == 0 and turn_ls != 0:
+                    turn_rs = -turn_ls
+                # Ensure opposite signs for a clean pivot
+                if turn_ls == turn_rs and turn_ls != 0:
+                    turn_rs = -turn_ls
+
+                target_left_pwm  = base * turn_ls
+                target_right_pwm = base * turn_rs
+
+                # Pivot PID: match magnitudes robustly (single-channel encoders safe)
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
-
-                # If encoders are single-channel (unsigned ticks), this is robust:
                 turn_error = abs(dL) - abs(dR)
 
                 proportional_t = KP_R * turn_error
@@ -470,13 +323,6 @@ def pid_control():
                 target_left_pwm  -= correction_turn
                 target_right_pwm += correction_turn
 
-                # TURN SIGN GUARD: ensure opposite signs remain opposite
-                tl, tr = sgn(target_left_pwm), sgn(target_right_pwm)
-                if tl == tr:
-                    tr = -tl if tl != 0 else 1
-                target_left_pwm  = max(MIN_PWM_THRESHOLD, min(100.0, abs(target_left_pwm)))  * tl
-                target_right_pwm = max(MIN_PWM_THRESHOLD, min(100.0, abs(target_right_pwm))) * tr
-
             else:
                 # Stopped: reset PID states and encoders
                 integral = 0.0
@@ -487,7 +333,7 @@ def pid_control():
                 target_left_pwm = 0.0
                 target_right_pwm = 0.0
 
-        # -------------- Ramping (same behavior as your code) --------------
+        # Ramping (unchanged)
         if use_ramping and use_PID:
             max_change_per_cycle = RAMP_RATE * dt
 
@@ -540,6 +386,7 @@ def pid_control():
                   f"(Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
 
         time.sleep(0.01)
+
 # ----------------------
 # Camera streaming server
 # ----------------------
