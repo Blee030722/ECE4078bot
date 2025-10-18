@@ -60,7 +60,7 @@ current_movement, prev_movement = 'stop', 'stop'
 # NEW: cap straight-mode differential so you never get 51/15-type splits
 STRAIGHT_MAX_DELTA = 12.0  # per side; raise to 6–8 if you need more authority
 LEFT_TRIM  = 1.00
-RIGHT_TRIM = 1.06   # try 1.03..1.10 depending on how bad the right is
+RIGHT_TRIM = 1.10   # try 1.03..1.10 depending on how bad the right is
 
 # NEW: encoder dead-time (filters bounce/EMI bursts that cause sudden count jumps)
 ENC_DEADTIME_NS = 1_000_000  # 1.0 ms; tune 0.5–3.0 ms as needed
