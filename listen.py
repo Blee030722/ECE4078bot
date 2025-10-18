@@ -58,7 +58,7 @@ MIN_PWM_THRESHOLD = 15
 current_movement, prev_movement = 'stop', 'stop'
 
 # NEW: cap straight-mode differential so you never get 51/15-type splits
-STRAIGHT_MAX_DELTA = 4.0  # per side; raise to 6–8 if you need more authority
+STRAIGHT_MAX_DELTA = 8.0  # per side; raise to 6–8 if you need more authority
 
 # NEW: encoder dead-time (filters bounce/EMI bursts that cause sudden count jumps)
 ENC_DEADTIME_NS = 1_000_000  # 1.0 ms; tune 0.5–3.0 ms as needed
