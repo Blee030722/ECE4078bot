@@ -58,7 +58,9 @@ MIN_PWM_THRESHOLD = 15
 current_movement, prev_movement = 'stop', 'stop'
 
 # NEW: cap straight-mode differential so you never get 51/15-type splits
-STRAIGHT_MAX_DELTA = 8.0  # per side; raise to 6–8 if you need more authority
+STRAIGHT_MAX_DELTA = 12.0  # per side; raise to 6–8 if you need more authority
+LEFT_TRIM  = 1.00
+RIGHT_TRIM = 1.06   # try 1.03..1.10 depending on how bad the right is
 
 # NEW: encoder dead-time (filters bounce/EMI bursts that cause sudden count jumps)
 ENC_DEADTIME_NS = 1_000_000  # 1.0 ms; tune 0.5–3.0 ms as needed
@@ -191,7 +193,7 @@ def pid_control():
     global left_pwm, right_pwm, left_count, right_count
     global use_PID, KP, KI, KD, KP_R, KI_R, KD_R, prev_movement, current_movement
 
-    # Linear PID state
+    # Straight PI state
     integral = 0.0
     last_error = 0.0
 
@@ -199,25 +201,25 @@ def pid_control():
     integral_turn = 0.0
     last_error_turn = 0.0
 
+    # Smoothed error (to avoid 1-tick flip-flop)
+    ema_err = 0.0
+    # ~60 ms time constant with 10–20 ms loop
+    EMA_ALPHA = 0.25
+
     lastL = left_count
     lastR = right_count
-    
     last_time = monotonic()
 
-    # Ramping variables
-    ramp_left_pwm = 0.0
-    ramp_right_pwm = 0.0
-    previous_left_target = 0.0
-    previous_right_target = 0.0
+    # Ramping for the COMMON/base speed only
+    ramp_base = 0.0
+    prev_base_target = 0.0
 
     while running:
-        current_time = monotonic()
-        dt = current_time - last_time if current_time - last_time > 0 else 1e-6
-        last_time = current_time
+        now = monotonic()
+        dt = now - last_time if now > last_time else 1e-6
+        last_time = now
 
         prev_movement = current_movement
-
-        # Movement mode decided ONLY by signs of commanded wheel speeds
         ls, rs = sgn(left_pwm), sgn(right_pwm)
         if ls == 0 and rs == 0:
             current_movement = 'stop'
@@ -226,165 +228,126 @@ def pid_control():
         else:
             current_movement = 'turn'
 
-        # Reset integrators on mode change (prevents windup flips after a spike)
         if current_movement != prev_movement:
-            integral = 0.0
-            last_error = 0.0
-            integral_turn = 0.0
-            last_error_turn = 0.0
+            integral = integral_turn = 0.0
+            last_error = last_error_turn = 0.0
 
-        # Start with the requested commands
-        target_left_pwm = left_pwm
-        target_right_pwm = right_pwm
+        # Start with requested commands
+        cmd_L = left_pwm
+        cmd_R = right_pwm
 
         if use_PID:
             if current_movement in ('forward', 'backward'):
-                # --- FORCE STRAIGHT: equal magnitudes (no arcs by command) ---
-                base = min(abs(left_pwm), abs(right_pwm))
+                # Equal magnitudes (no arc command)
+                base_mag = min(abs(cmd_L), abs(cmd_R))
                 sign_dir = 1 if current_movement == 'forward' else -1
-                target_left_pwm  = base * sign_dir
-                target_right_pwm = base * sign_dir
 
-                # Straight-line PID: equalize encoder ticks (dL == dR)
+                # Read encoder deltas
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
-                error = dL - dR
-
-                proportional = KP * error
-                integral += KI * error * dt
-                integral = max(-MAX_CORRECTION, min(integral, MAX_CORRECTION))  # Anti-windup
-                derivative = KD * (error - last_error) / dt if dt > 0 else 0.0
-                correction = proportional + integral + derivative
-                last_error = error
-
-                # How much differential can we apply around 'base' without clipping?
-                span_min = max(0.0, base - MIN_PWM_THRESHOLD)
-                span_max = max(0.0, 100.0 - base)
-                span = min(span_min, span_max)  # symmetric room
-
-                # Absolute cap to avoid visible curves (prevents 51/15)
-                delta_cap = min(span, STRAIGHT_MAX_DELTA)
-
-                # Clamp correction into +/- delta_cap
-                correction = max(-delta_cap, min(correction, delta_cap))
-
-                # If going backward, flip correction sign so "straight" stays straight
-                if sign_dir < 0:
-                    correction = -correction
-
-                # Apply *symmetric* differential around the base
-                L = base - correction
-                R = base + correction
-
-                # Guard rails
-                L = max(MIN_PWM_THRESHOLD, min(100.0, L))
-                R = max(MIN_PWM_THRESHOLD, min(100.0, R))
-
-                target_left_pwm  = L * sign_dir
-                target_right_pwm = R * sign_dir
-
                 lastL, lastR = curL, curR
+
+                # Smooth the 1-tick noise
+                raw_err = (dL - dR) * (1 if sign_dir > 0 else -1)
+                # Flip sign when going backward so "positive = left faster" stays consistent
+                ema_err = (1.0 - EMA_ALPHA) * ema_err + EMA_ALPHA * raw_err
+
+                # PI(D) correction
+                proportional = KP * ema_err
+                integral += KI * ema_err * dt
+                # Anti-windup
+                integral = max(-STRAIGHT_MAX_DELTA, min(integral, STRAIGHT_MAX_DELTA))
+                derivative = KD * (ema_err - last_error) / dt if dt > 0 else 0.0
+                corr = proportional + integral + derivative
+                last_error = ema_err
+
+                # Headroom around base to stay within [MIN,100]
+                span_min = max(0.0, base_mag - MIN_PWM_THRESHOLD)
+                span_max = max(0.0, 100.0 - base_mag)
+                headroom = min(span_min, span_max)
+                delta_cap = min(headroom, STRAIGHT_MAX_DELTA)
+
+                # Clamp differential correction
+                if corr > 0:   # left is faster → slow left, boost right
+                    corr = min(corr, delta_cap)
+                else:
+                    corr = max(corr, -delta_cap)
+
+                # === RAMP COMMON SPEED ONLY ===
+                target_base = base_mag * sign_dir
+                max_change = RAMP_RATE * dt
+                if abs(target_base - ramp_base) <= max_change:
+                    ramp_base = target_base
+                else:
+                    ramp_base += max_change if (target_base > ramp_base) else -max_change
+
+                # Apply instantaneous differential around the ramped base
+                target_left_pwm  = (ramp_base - corr)
+                target_right_pwm = (ramp_base + corr)
 
             elif current_movement == 'turn':
-                # --- Preserve requested turn direction ---
-                # Use the larger magnitude, then set equal-and-opposite magnitudes
-                base = max(abs(left_pwm), abs(right_pwm))
+                # Make a clean pivot: equal-and-opposite magnitudes
+                base = max(abs(cmd_L), abs(cmd_R))
+                t_ls, t_rs = sgn(cmd_L), sgn(cmd_R)
+                if t_ls == 0 and t_rs != 0: t_ls = -t_rs
+                if t_rs == 0 and t_ls != 0: t_rs = -t_ls
+                if t_ls == t_rs and t_ls != 0: t_rs = -t_ls
 
-                # Signs of incoming commands
-                turn_ls, turn_rs = sgn(left_pwm), sgn(right_pwm)
+                target_left_pwm  = base * t_ls
+                target_right_pwm = base * t_rs
 
-                # If one side is zero, make it the opposite sign of the other so it pivots
-                if turn_ls == 0 and turn_rs != 0:
-                    turn_ls = -turn_rs
-                if turn_rs == 0 and turn_ls != 0:
-                    turn_rs = -turn_ls
-                # Ensure opposite signs for a clean pivot
-                if turn_ls == turn_rs and turn_ls != 0:
-                    turn_rs = -turn_ls
-
-                target_left_pwm  = base * turn_ls
-                target_right_pwm = base * turn_rs
-
-                # Pivot PID: match magnitudes robustly (single-channel encoders safe)
+                # Pivot PID on |ticks|
                 curL, curR = left_count, right_count
                 dL, dR = curL - lastL, curR - lastR
-                turn_error = abs(dL) - abs(dR)
-
-                proportional_t = KP_R * turn_error
-                integral_turn += KI_R * turn_error * dt
-                integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
-                derivative_t = KD_R * (turn_error - last_error_turn) / dt if dt > 0 else 0.0
-                correction_turn = proportional_t + integral_turn + derivative_t
-                correction_turn = max(-MAX_CORRECTION, min(correction_turn, MAX_CORRECTION))
-                last_error_turn = turn_error
                 lastL, lastR = curL, curR
+                turn_err = abs(dL) - abs(dR)
 
-                # Apply correction symmetrically
-                target_left_pwm  -= correction_turn
-                target_right_pwm += correction_turn
+                p_t = KP_R * turn_err
+                integral_turn += KI_R * turn_err * dt
+                integral_turn = max(-MAX_CORRECTION, min(integral_turn, MAX_CORRECTION))
+                d_t = KD_R * (turn_err - last_error_turn) / dt if dt > 0 else 0.0
+                corr_t = max(-MAX_CORRECTION, min(p_t + integral_turn + d_t, MAX_CORRECTION))
+                last_error_turn = turn_err
+
+                target_left_pwm  -= corr_t
+                target_right_pwm += corr_t
 
             else:
-                # Stopped: reset PID states and encoders
-                integral = 0.0
-                last_error = 0.0
-                integral_turn = 0.0
-                last_error_turn = 0.0
+                # stop
+                integral = integral_turn = 0.0
+                last_error = last_error_turn = 0.0
+                ramp_base = 0.0
                 reset_encoder()
                 target_left_pwm = 0.0
                 target_right_pwm = 0.0
-
-        # Ramping (unchanged)
-        if use_ramping and use_PID:
-            max_change_per_cycle = RAMP_RATE * dt
-
-            left_diff = target_left_pwm - ramp_left_pwm
-            right_diff = target_right_pwm - ramp_right_pwm
-
-            left_needs_ramp = abs(left_diff) > MIN_RAMP_THRESHOLD
-            right_needs_ramp = abs(right_diff) > MIN_RAMP_THRESHOLD
-
-            left_direction_change = (target_left_pwm * previous_left_target < 0) and target_left_pwm != 0 and previous_left_target != 0
-            right_direction_change = (target_right_pwm * previous_right_target < 0) and target_right_pwm != 0 and previous_right_target != 0
-
-            if left_direction_change:
-                ramp_left_pwm = target_left_pwm
-            if right_direction_change:
-                ramp_right_pwm = target_right_pwm
-
-            if not left_direction_change and not right_direction_change:
-                if left_needs_ramp or right_needs_ramp:
-                    # Left motor ramping
-                    if abs(left_diff) <= max_change_per_cycle:
-                        ramp_left_pwm = target_left_pwm
-                    else:
-                        ramp_left_pwm += max_change_per_cycle if left_diff > 0 else -max_change_per_cycle
-
-                    # Right motor ramping
-                    if abs(right_diff) <= max_change_per_cycle:
-                        ramp_right_pwm = target_right_pwm
-                    else:
-                        ramp_right_pwm += max_change_per_cycle if right_diff > 0 else -max_change_per_cycle
-                else:
-                    ramp_left_pwm = target_left_pwm
-                    ramp_right_pwm = target_right_pwm
-
-            previous_left_target = target_left_pwm
-            previous_right_target = target_right_pwm
-
         else:
-            # No ramping: apply target directly
-            ramp_left_pwm = target_left_pwm
-            ramp_right_pwm = target_right_pwm
+            # No PID: just ramp the common speed a bit for smoothness
+            base_mag = min(abs(cmd_L), abs(cmd_R))
+            sign_dir = sgn(cmd_L + cmd_R) or 1
+            target_base = base_mag * sign_dir
+            max_change = RAMP_RATE * dt
+            if abs(target_base - ramp_base) <= max_change:
+                ramp_base = target_base
+            else:
+                ramp_base += max_change if (target_base > ramp_base) else -max_change
+            # Keep original differential (teleop)
+            diff = (cmd_R - cmd_L) / 2.0
+            target_left_pwm  = ramp_base - diff
+            target_right_pwm = ramp_base + diff
 
-        final_left_pwm = apply_min_threshold(ramp_left_pwm, MIN_PWM_THRESHOLD)
-        final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
+        # Apply optional static trim before thresholding
+        target_left_pwm  *= LEFT_TRIM
+        target_right_pwm *= RIGHT_TRIM
+
+        # Enforce minimum PWM threshold (preserve sign)
+        final_left_pwm  = apply_min_threshold(target_left_pwm,  MIN_PWM_THRESHOLD)
+        final_right_pwm = apply_min_threshold(target_right_pwm, MIN_PWM_THRESHOLD)
+
         set_motors(final_left_pwm, final_right_pwm)
 
-        # Optional debug print
-        if ramp_left_pwm != 0 or ramp_right_pwm != 0:
-            print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), "
+        if final_left_pwm != 0 or final_right_pwm != 0:
+            print(f"(Left PWM, Right PWM)=({final_left_pwm:.2f},{final_right_pwm:.2f}), "
                   f"(Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
-
         time.sleep(0.01)
 
 # ----------------------
