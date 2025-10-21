@@ -353,6 +353,8 @@ def pid_control():
                 reset_encoder()
                 target_left_pwm = 0.0
                 target_right_pwm = 0.0
+                ramp_left_pwm = 0.0
+                ramp_right_pwm = 0.0
 
         # ----------------------
         # Ramping (keep your original "synchronized" ramp)
@@ -395,10 +397,17 @@ def pid_control():
             ramp_left_pwm  = target_left_pwm
             ramp_right_pwm = target_right_pwm
 
-        final_left_pwm  = apply_min_threshold(ramp_left_pwm,  MIN_PWM_THRESHOLD)
-        final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
+        target_is_zero = (target_left_pwm == 0.0 and target_right_pwm == 0.0)
+        if target_is_zero:
+            # force exact zero when we commanded a stop
+            ramp_left_pwm = 0.0
+            ramp_right_pwm = 0.0
+            final_left_pwm  = 0.0
+            final_right_pwm = 0.0
+        else:
+            final_left_pwm  = apply_min_threshold(ramp_left_pwm,  MIN_PWM_THRESHOLD)
+            final_right_pwm = apply_min_threshold(ramp_right_pwm, MIN_PWM_THRESHOLD)
         set_motors(final_left_pwm, final_right_pwm)
-
         if ramp_left_pwm != 0 or ramp_right_pwm != 0:
             print(f"(Left PWM, Right PWM)=({ramp_left_pwm:.2f},{ramp_right_pwm:.2f}), "
                   f"(Left Enc, Right Enc)=({left_count}, {right_count}), mode={current_movement}")
