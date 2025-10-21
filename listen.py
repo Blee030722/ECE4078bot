@@ -67,6 +67,7 @@ use_ramping = True
 RAMP_RATE = 250            # PWM units per second
 MIN_RAMP_THRESHOLD = 15    # Only ramp if change is greater than this
 MIN_PWM_THRESHOLD = 15
+BRAKE_ON_ZERO = False
 
 current_movement, prev_movement = 'stop', 'stop'
 
@@ -154,10 +155,16 @@ def set_motors(left, right):
         GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
         right_motor_pwm.ChangeDutyCycle(min(abs(right), 100))
     else:
-        # Active braking when pwm=0
-        GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
-        GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
-        right_motor_pwm.ChangeDutyCycle(100)
+        if BRAKE_ON_ZERO:
+            # active brake (old behavior)
+            GPIO.output(RIGHT_MOTOR_IN1, GPIO.HIGH)
+            GPIO.output(RIGHT_MOTOR_IN2, GPIO.HIGH)
+            right_motor_pwm.ChangeDutyCycle(100)
+        else:
+            # COAST (new behavior)
+            GPIO.output(RIGHT_MOTOR_IN1, GPIO.LOW)
+            GPIO.output(RIGHT_MOTOR_IN2, GPIO.LOW)
+            right_motor_pwm.ChangeDutyCycle(0)
 
     # Left motor
     if left > 0:
@@ -169,9 +176,14 @@ def set_motors(left, right):
         GPIO.output(LEFT_MOTOR_IN4, GPIO.HIGH)
         left_motor_pwm.ChangeDutyCycle(min(abs(left), 100))
     else:
-        GPIO.output(LEFT_MOTOR_IN3, GPIO.HIGH)
-        GPIO.output(LEFT_MOTOR_IN4, GPIO.HIGH)
-        left_motor_pwm.ChangeDutyCycle(100)
+        if BRAKE_ON_ZERO:
+            GPIO.output(LEFT_MOTOR_IN3, GPIO.HIGH)
+            GPIO.output(LEFT_MOTOR_IN4, GPIO.HIGH)
+            left_motor_pwm.ChangeDutyCycle(100)
+        else:
+            GPIO.output(LEFT_MOTOR_IN3, GPIO.LOW)
+            GPIO.output(LEFT_MOTOR_IN4, GPIO.LOW)
+            left_motor_pwm.ChangeDutyCycle(0)
 
 def apply_min_threshold(pwm_value, min_threshold):
     if pwm_value == 0:
