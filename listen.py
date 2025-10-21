@@ -27,6 +27,8 @@ HOST = '0.0.0.0'
 WHEEL_PORT = 8000
 CAMERA_PORT = 8001
 PID_CONFIG_PORT = 8002
+ENCODER_STREAM_PORT = 8003 
+ENCODER_STREAM_HZ = 50
 
 # ----------------------
 # Pins
@@ -180,6 +182,42 @@ def apply_min_threshold(pwm_value, min_threshold):
 
 def sgn(x: float) -> int:
     return 1 if x > 0 else (-1 if x < 0 else 0)
+
+def encoder_stream_server():
+    """Continuously push (left_count, right_count) as two big-endian int32s."""
+    global running, left_count, right_count
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, ENCODER_STREAM_PORT))
+    server_socket.listen(1)
+    print(f"Encoder stream server started on port {ENCODER_STREAM_PORT}")
+
+    period = 1.0 / ENCODER_STREAM_HZ
+
+    while running:
+        try:
+            client_socket, _ = server_socket.accept()
+            print("Encoder stream client connected")
+            while running:
+                # Pack (L, R) as 8 bytes: "!ii" = big-endian int32, int32
+                payload = struct.pack("!ii", left_count, right_count)
+                try:
+                    client_socket.sendall(payload)
+                except Exception:
+                    print("Encoder stream client disconnected")
+                    break
+                time.sleep(period)
+        except Exception as e:
+            print(f"Encoder stream server error: {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
+
+    server_socket.close()
+
 
 # ----------------------
 # PID Control Thread
@@ -504,6 +542,10 @@ def main():
         # PID config
         pid_config_thread = threading.Thread(target=pid_config_server, daemon=True)
         pid_config_thread.start()
+
+        # NEW: Encoder stream
+        enc_stream_thread = threading.Thread(target=encoder_stream_server, daemon=True)
+        enc_stream_thread.start()
 
         # Wheel server (main thread)
         wheel_server()
